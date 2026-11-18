@@ -71,9 +71,11 @@ build still succeeds with a warning.
 - All edits start from the stored original, so pressing `Apply gain` twice does not stack
   (1.5x twice is still 1.5x, not 2.25x).
 - Changing the search text or filter clears the selection, so hidden rows cannot be edited.
-- Only 8-bit and 16-bit PCM waves are supported. MP3 entries are skipped without being read
-  (they cannot be edited in place), and float/24-32-bit waves are reported as skipped; neither is
-  marked modified.
+- Amplify and Silence work on 8/16-bit PCM waves and on MP3. MP3 is edited by rewriting the
+  per-granule `global_gain`, so loudness changes while the file keeps its exact byte length and
+  every other field (and decode timing) stays identical.
+- Replacing an MP3 is not possible: the entry length cannot change inside a VPK. Float and
+  24/32-bit waves are reported as skipped and are not marked modified.
 - Large batches are processed a few files per frame, so the window stays responsive and shows
   `working 120/786`.
 - Muting 8-bit PCM writes 0x80 (the unsigned midpoint), not 0x00, so it is silence instead of

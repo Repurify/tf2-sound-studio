@@ -2,6 +2,7 @@
 
 mod app;
 mod store;
+mod mp3;
 mod vpk;
 mod wav;
 

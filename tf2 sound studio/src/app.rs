@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::store::{self, Key};
 use crate::vpk::{self, Entry};
 use crate::wav;
+use crate::mp3;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Filter {
@@ -210,9 +211,14 @@ impl App {
             job.idx += 1;
             processed += 1;
 
-            // compressed entries cannot be edited; skip before touching the disk
-            if e.path.to_ascii_lowercase().ends_with(".mp3") {
+            let is_mp3 = e.path.to_ascii_lowercase().ends_with(".mp3");
+            // mp3 replacement would change the entry length, which a VPK cannot do
+            if is_mp3 && matches!(job.op, Op::Replace(_)) {
                 job.skipped += 1;
+                if job.logged_skip < 5 {
+                    self.push(format!("{}: mp3 cannot be replaced, skipped", e.path));
+                    job.logged_skip += 1;
+                }
                 continue;
             }
             let current = match vpk::read_entry(&dir, e) {
@@ -228,10 +234,18 @@ impl App {
                 .get(&e.key())
                 .cloned()
                 .unwrap_or_else(|| current.clone());
-            let new = match &job.op {
-                Op::Gain(g) => wav::gain(&baseline, *g).map(|(d, _, _)| d),
-                Op::Mute => wav::silence(&baseline),
-                Op::Replace(bytes) => wav::replace_fit(&baseline, bytes),
+            let new = if is_mp3 {
+                match &job.op {
+                    Op::Gain(g) => mp3::scale(&baseline, *g),
+                    Op::Mute => mp3::silence(&baseline),
+                    Op::Replace(_) => None,
+                }
+            } else {
+                match &job.op {
+                    Op::Gain(g) => wav::gain(&baseline, *g).map(|(d, _, _)| d),
+                    Op::Mute => wav::silence(&baseline),
+                    Op::Replace(bytes) => wav::replace_fit(&baseline, bytes),
+                }
             };
             let new = match new {
                 Some(n) => n,
