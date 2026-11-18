@@ -3,42 +3,66 @@ use std::path::{Path, PathBuf};
 
 pub type Key = (u8, u16, u32, u32); // pack, arch, offset, len
 
+const MAX_RECORDS: usize = 200_000;
+const MAX_ENTRY: u32 = 64 * 1024 * 1024;
+
 pub fn backup_path(tf_dir: &Path) -> PathBuf {
     tf_dir.join("sound_studio_backup.bin")
 }
 
-fn rd_u16(d: &[u8], p: usize) -> u16 {
-    u16::from_le_bytes([d[p], d[p + 1]])
+fn rd_u16(d: &[u8], p: usize) -> Option<u16> {
+    let b = d.get(p..p + 2)?;
+    Some(u16::from_le_bytes([b[0], b[1]]))
 }
-fn rd_u32(d: &[u8], p: usize) -> u32 {
-    u32::from_le_bytes([d[p], d[p + 1], d[p + 2], d[p + 3]])
+fn rd_u32(d: &[u8], p: usize) -> Option<u32> {
+    let b = d.get(p..p + 4)?;
+    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
+fn silent_pcm(d: &[u8]) -> bool {
+    match d.windows(4).position(|w| w == b"data") {
+        Some(i) => d[i + 8..].iter().take(2048).all(|b| *b == 0),
+        None => false,
+    }
+}
+
+/// Tolerant load: a damaged file yields whatever records are valid, never a panic.
 pub fn load(tf_dir: &Path) -> HashMap<Key, Vec<u8>> {
-    let path = backup_path(tf_dir);
     let mut map = HashMap::new();
-    let data = match std::fs::read(&path) {
+    let data = match std::fs::read(backup_path(tf_dir)) {
         Ok(d) => d,
         Err(_) => return map,
     };
-    if data.len() < 4 {
-        return map;
-    }
-    let count = rd_u32(&data, 0) as usize;
+    let count = match rd_u32(&data, 0) {
+        Some(c) => (c as usize).min(MAX_RECORDS),
+        None => return map,
+    };
     let mut p = 4usize;
     for _ in 0..count {
-        if p + 11 > data.len() {
+        let pack = match data.get(p) {
+            Some(v) => *v,
+            None => break,
+        };
+        let arch = match rd_u16(&data, p + 1) {
+            Some(v) => v,
+            None => break,
+        };
+        let off = match rd_u32(&data, p + 3) {
+            Some(v) => v,
+            None => break,
+        };
+        let len = match rd_u32(&data, p + 7) {
+            Some(v) => v,
+            None => break,
+        };
+        if len > MAX_ENTRY {
             break;
         }
-        let pack = data[p];
-        let arch = rd_u16(&data, p + 1);
-        let off = rd_u32(&data, p + 3);
-        let len = rd_u32(&data, p + 7);
         p += 11;
-        let end = p + len as usize;
-        if end > data.len() {
-            break;
-        }
+        let end = match p.checked_add(len as usize) {
+            Some(e) if e <= data.len() => e,
+            _ => break,
+        };
         map.insert((pack, arch, off, len), data[p..end].to_vec());
         p = end;
     }
@@ -59,47 +83,46 @@ pub fn save(tf_dir: &Path, map: &HashMap<Key, Vec<u8>>) -> std::io::Result<()> {
 }
 
 /// Import legacy python-tool backups (arch, off, len, data records, sound misc pack).
+/// Only fills in entries that are missing or currently silent, so it cannot clobber
+/// a good backup with a bad one.
 pub fn import_legacy(tf_dir: &Path, map: &mut HashMap<Key, Vec<u8>>) -> usize {
     let mut added = 0usize;
     for name in ["cart_silence_backup.bin", "footstep_gain_backup.bin"] {
-        let p = tf_dir.join(name);
-        let data = match std::fs::read(&p) {
+        let data = match std::fs::read(tf_dir.join(name)) {
             Ok(d) => d,
             Err(_) => continue,
         };
-        if data.len() < 4 {
-            continue;
-        }
-        let count = rd_u32(&data, 0) as usize;
+        let count = match rd_u32(&data, 0) {
+            Some(c) => (c as usize).min(MAX_RECORDS),
+            None => continue,
+        };
         let mut q = 4usize;
         for _ in 0..count {
-            if q + 12 > data.len() {
+            let arch = match rd_u32(&data, q) {
+                Some(v) => v as u16,
+                None => break,
+            };
+            let off = match rd_u32(&data, q + 4) {
+                Some(v) => v,
+                None => break,
+            };
+            let len = match rd_u32(&data, q + 8) {
+                Some(v) => v,
+                None => break,
+            };
+            if len > MAX_ENTRY {
                 break;
             }
-            let arch = rd_u32(&data, q) as u16;
-            let off = rd_u32(&data, q + 4);
-            let len = rd_u32(&data, q + 8);
             q += 12;
-            let end = q + len as usize;
-            if end > data.len() {
-                break;
-            }
-            let key = (0u8, arch, off, len);
+            let end = match q.checked_add(len as usize) {
+                Some(e) if e <= data.len() => e,
+                _ => break,
+            };
             let candidate = data[q..end].to_vec();
-            let silent = candidate
-                .windows(4)
-                .position(|w| w == b"data")
-                .map(|i| candidate[i + 8..].iter().take(2048).all(|b| *b == 0))
-                .unwrap_or(false);
+            let key = (0u8, arch, off, len);
             match map.get(&key) {
                 Some(existing) => {
-                    let existing_silent = existing
-                        .windows(4)
-                        .position(|w| w == b"data")
-                        .map(|i| existing[i + 8..].iter().take(2048).all(|b| *b == 0))
-                        .unwrap_or(false);
-                    // legacy backups hold pre-edit audio; replace a silent record with it
-                    if existing_silent && !silent {
+                    if silent_pcm(existing) && !silent_pcm(&candidate) {
                         map.insert(key, candidate);
                         added += 1;
                     }
@@ -113,4 +136,34 @@ pub fn import_legacy(tf_dir: &Path, map: &mut HashMap<Key, Vec<u8>>) -> usize {
         }
     }
     added
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("tf2ss_{}_{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn corrupt_backup_does_not_panic() {
+        let d = tmp("corrupt");
+        std::fs::write(backup_path(&d), vec![0xFFu8; 20]).unwrap();
+        let map = load(&d);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn roundtrip() {
+        let d = tmp("round");
+        let mut map = HashMap::new();
+        map.insert((0u8, 3u16, 100u32, 4u32), vec![1, 2, 3, 4]);
+        save(&d, &map).unwrap();
+        let back = load(&d);
+        assert_eq!(back.get(&(0u8, 3u16, 100u32, 4u32)), Some(&vec![1, 2, 3, 4]));
+    }
 }

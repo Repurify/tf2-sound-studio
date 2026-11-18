@@ -44,7 +44,21 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+#[cfg(windows)]
+fn attach_console() {
+    extern "system" {
+        fn AttachConsole(dw_process_id: u32) -> i32;
+    }
+    unsafe {
+        AttachConsole(0xFFFF_FFFF);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_console() {}
+
 fn verify() {
+    attach_console();
     let dir = match app::detect_tf_dir() {
         Some(d) => d,
         None => {

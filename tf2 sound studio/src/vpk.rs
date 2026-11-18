@@ -3,9 +3,11 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub const MAGIC: u32 = 0x55AA_1234;
-
 pub const PACK_MISC: u8 = 0;
 pub const PACK_VO: u8 = 1;
+
+/// Sanity cap so a corrupted directory cannot make us allocate gigabytes.
+const MAX_ENTRY: u32 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Entry {
@@ -37,37 +39,40 @@ pub fn dir_vpk_path(tf_dir: &Path, pack: u8) -> PathBuf {
     tf_dir.join(format!("{}_dir.vpk", pack_prefix(pack)))
 }
 
+fn u16at(data: &[u8], p: usize) -> Option<u16> {
+    let b = data.get(p..p + 2)?;
+    Some(u16::from_le_bytes([b[0], b[1]]))
+}
+fn u32at(data: &[u8], p: usize) -> Option<u32> {
+    let b = data.get(p..p + 4)?;
+    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
 fn cstr(data: &[u8], pos: &mut usize) -> Option<String> {
-    let start = *pos;
-    let end = *pos + data[start..].iter().position(|&b| b == 0)?;
-    *pos = end + 1;
-    Some(String::from_utf8_lossy(&data[start..end]).to_string())
+    let rest = data.get(*pos..)?;
+    let len = rest.iter().position(|&b| b == 0)?;
+    let s = String::from_utf8_lossy(&rest[..len]).to_string();
+    *pos += len + 1;
+    Some(s)
 }
 
-fn u16at(data: &[u8], p: usize) -> u16 {
-    u16::from_le_bytes([data[p], data[p + 1]])
-}
-fn u32at(data: &[u8], p: usize) -> u32 {
-    u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+fn bad(msg: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, msg.to_string())
 }
 
-/// Parse a `*_dir.vpk` tree into entries. Only VPK 1/2 supported (TF2 uses 2).
+/// Parse a `*_dir.vpk` tree. Corrupt input returns an error instead of panicking.
 pub fn index_pack(tf_dir: &Path, pack: u8) -> std::io::Result<Vec<Entry>> {
     let path = dir_vpk_path(tf_dir, pack);
     let mut data = Vec::new();
     File::open(&path)?.read_to_end(&mut data)?;
-    if data.len() < 12 || u32at(&data, 0) != MAGIC {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("not a VPK: {}", path.display()),
-        ));
+    if data.len() < 12 || u32at(&data, 0) != Some(MAGIC) {
+        return Err(bad("not a VPK directory file"));
     }
-    let version = u32at(&data, 4);
-    let (mut pos, tree_end) = if version == 2 {
-        (28usize, 28 + u32at(&data, 8) as usize)
-    } else {
-        (12usize, 12 + u32at(&data, 8) as usize)
-    };
+    let version = u32at(&data, 4).ok_or_else(|| bad("truncated VPK header"))?;
+    let tree_size = u32at(&data, 8).ok_or_else(|| bad("truncated VPK header"))? as usize;
+    let (mut pos, tree_end) = if version == 2 { (28usize, 28 + tree_size) } else { (12usize, 12 + tree_size) };
+    let tree_end = tree_end.min(data.len());
+
     let mut out = Vec::new();
     while pos < tree_end {
         let ext = match cstr(&data, &mut pos) {
@@ -93,17 +98,18 @@ pub fn index_pack(tf_dir: &Path, pack: u8) -> std::io::Result<Vec<Entry>> {
                 if name.is_empty() {
                     break;
                 }
-                if pos + 18 > data.len() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "truncated VPK tree",
-                    ));
+                let preload = u16at(&data, pos + 4).ok_or_else(|| bad("truncated entry"))?;
+                let arch = u16at(&data, pos + 6).ok_or_else(|| bad("truncated entry"))?;
+                let off = u32at(&data, pos + 8).ok_or_else(|| bad("truncated entry"))?;
+                let len = u32at(&data, pos + 12).ok_or_else(|| bad("truncated entry"))?;
+                let term = u16at(&data, pos + 16).ok_or_else(|| bad("truncated entry"))?;
+                if term != 0xFFFF {
+                    return Err(bad("bad entry terminator"));
                 }
-                let preload = u16at(&data, pos + 4) as usize;
-                let arch = u16at(&data, pos + 6);
-                let off = u32at(&data, pos + 8);
-                let len = u32at(&data, pos + 12);
-                pos += 16 + 2 + preload;
+                pos += 18 + preload as usize;
+                if len > MAX_ENTRY {
+                    continue;
+                }
                 out.push(Entry {
                     path: format!("{}/{}.{}", dir, name, ext),
                     pack,
@@ -118,14 +124,20 @@ pub fn index_pack(tf_dir: &Path, pack: u8) -> std::io::Result<Vec<Entry>> {
 }
 
 pub fn read_entry(tf_dir: &Path, e: &Entry) -> std::io::Result<Vec<u8>> {
-    let mut buf = vec![0u8; e.len as usize];
-    if e.arch == 0xFFFF {
-        let mut f = File::open(dir_vpk_path(tf_dir, e.pack))?;
-        f.seek(SeekFrom::Start(e.off as u64))?;
-        f.read_exact(&mut buf)?;
-        return Ok(buf);
+    if e.len > MAX_ENTRY {
+        return Err(bad("entry too large"));
     }
-    let mut f = File::open(chunk_path(tf_dir, e.pack, e.arch))?;
+    let mut buf = vec![0u8; e.len as usize];
+    let path = if e.arch == 0xFFFF {
+        dir_vpk_path(tf_dir, e.pack)
+    } else {
+        chunk_path(tf_dir, e.pack, e.arch)
+    };
+    let mut f = File::open(&path)?;
+    let meta_len = f.metadata()?.len();
+    if e.off as u64 + e.len as u64 > meta_len {
+        return Err(bad("entry outside archive"));
+    }
     f.seek(SeekFrom::Start(e.off as u64))?;
     f.read_exact(&mut buf)?;
     Ok(buf)
@@ -144,7 +156,11 @@ pub fn write_entry(tf_dir: &Path, e: &Entry, data: &[u8]) -> std::io::Result<()>
     } else {
         chunk_path(tf_dir, e.pack, e.arch)
     };
-    let mut f = std::fs::OpenOptions::new().write(true).open(path)?;
+    let mut f = std::fs::OpenOptions::new().write(true).open(&path)?;
+    let meta_len = f.metadata()?.len();
+    if e.off as u64 + e.len as u64 > meta_len {
+        return Err(bad("entry outside archive"));
+    }
     f.seek(SeekFrom::Start(e.off as u64))?;
     f.write_all(data)?;
     f.flush()?;

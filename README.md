@@ -63,6 +63,24 @@ build still succeeds with a warning.
 
 `--verify` prints pack entry counts and wav metadata without touching anything.
 
+
+## Safety behaviour
+
+- Backups are written to disk **before** the game file is modified, so an interrupted run
+  never leaves an un-backed-up wave.
+- All edits start from the stored original, so pressing `Apply gain` twice does not stack
+  (1.5x twice is still 1.5x, not 2.25x).
+- Changing the search text or filter clears the selection, so hidden rows cannot be edited.
+- Only 8-bit and 16-bit PCM waves are supported. MP3/float/24-32-bit entries are reported as
+  skipped and are **not** marked modified.
+- Muting 8-bit PCM writes 0x80 (the unsigned midpoint), not 0x00, so it is silence instead of
+  a click.
+- Replacement audio keeps its own channels: stereo stays stereo, mono is duplicated, stereo into
+  mono is mixed down.
+- Every write is read back and compared; a failed write is counted as a failure, not "ok".
+- Corrupt VPK directories, damaged backup files and unreadable replacement WAVs are reported in
+  the log instead of crashing.
+
 ## Limitations
 
 - Steam *verify integrity* or a game update restores original waves; re-apply afterwards.

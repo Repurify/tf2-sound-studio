@@ -102,7 +102,7 @@ impl App {
             .entries
             .iter()
             .enumerate()
-            .filter(|(i, e)| {
+            .filter(|(_, e)| {
                 if !q.is_empty() && !e.path.to_lowercase().contains(&q) {
                     return false;
                 }
@@ -127,7 +127,7 @@ impl App {
         v
     }
 
-    fn apply_all(&mut self, label: &str, mut f: impl FnMut(&Entry, &[u8]) -> Option<Vec<u8>>) {
+    fn apply_all(&mut self, label: &str, mut f: impl FnMut(&[u8]) -> Option<Vec<u8>>) {
         let Some(dir) = self.tf_dir.clone() else {
             self.push("no tf folder loaded");
             return;
@@ -143,9 +143,9 @@ impl App {
             self.push("nothing selected");
             return;
         }
-        let (mut ok, mut fail) = (0usize, 0usize);
+        let (mut ok, mut fail, mut skipped) = (0usize, 0usize, 0usize);
         for e in &targets {
-            let orig = match vpk::read_entry(&dir, e) {
+            let current = match vpk::read_entry(&dir, e) {
                 Ok(d) => d,
                 Err(err) => {
                     self.push(format!("read {} failed: {}", e.path, err));
@@ -153,34 +153,55 @@ impl App {
                     continue;
                 }
             };
-            match f(e, &orig) {
-                Some(new) => {
-                    if new.len() != e.len as usize {
-                        self.push(format!("{}: length changed, skipped", e.path));
-                        fail += 1;
-                        continue;
-                    }
-                    match vpk::write_entry(&dir, e, &new) {
-                        Ok(_) => {
-                            self.backup.entry(e.key()).or_insert(orig);
-                            ok += 1;
-                        }
-                        Err(err) => {
-                            self.push(format!("write {} failed: {}", e.path, err));
-                            fail += 1;
-                        }
-                    }
-                }
+            // always transform from the original bytes when we have them, so gain
+            // does not stack and a second replace starts from a clean slate
+            let baseline = self
+                .backup
+                .get(&e.key())
+                .cloned()
+                .unwrap_or_else(|| current.clone());
+            let new = match f(&baseline) {
+                Some(n) => n,
                 None => {
+                    skipped += 1;
                     self.push(format!("{}: unsupported format, skipped", e.path));
+                    continue;
+                }
+            };
+            if new.len() != e.len as usize {
+                self.push(format!("{}: length changed, skipped", e.path));
+                fail += 1;
+                continue;
+            }
+            // durability: the original must be on disk before the game file changes
+            self.backup.entry(e.key()).or_insert_with(|| baseline.clone());
+            if let Err(err) = store::save(&dir, &self.backup) {
+                self.push(format!("backup save failed, aborting: {}", err));
+                fail += 1;
+                break;
+            }
+            match vpk::write_entry(&dir, e, &new) {
+                Ok(_) => match vpk::read_entry(&dir, e) {
+                    Ok(check) if check == new => ok += 1,
+                    Ok(_) => {
+                        self.push(format!("{}: write did not stick, skipped", e.path));
+                        fail += 1;
+                    }
+                    Err(err) => {
+                        self.push(format!("{}: verify failed: {}", e.path, err));
+                        fail += 1;
+                    }
+                },
+                Err(err) => {
+                    self.push(format!("write {} failed: {}", e.path, err));
                     fail += 1;
                 }
             }
         }
-        if let Err(e) = store::save(&dir, &self.backup) {
-            self.push(format!("backup save failed: {}", e));
-        }
-        self.push(format!("{}: {} ok, {} skipped", label, ok, fail));
+        self.push(format!(
+            "{}: {} ok, {} failed, {} skipped",
+            label, ok, fail, skipped
+        ));
         self.refilter();
     }
 
@@ -291,7 +312,7 @@ impl App {
             ui.label(egui::RichText::new(Self::db_label(self.gain)).weak());
             if ui.button("Apply gain").clicked() {
                 let g = self.gain;
-                self.apply_all("gain", move |_, d| Some(wav::gain(d, g).0));
+                self.apply_all("gain", move |base| wav::gain(base, g).map(|(d, _, _)| d));
             }
         });
 
@@ -299,7 +320,7 @@ impl App {
         ui.label("Mute");
         ui.horizontal(|ui| {
             if ui.button("Silence selected").clicked() {
-                self.apply_all("mute", |_, d| Some(wav::silence(d)));
+                self.apply_all("mute", |base| wav::silence(base));
             }
         });
 
@@ -361,9 +382,7 @@ impl App {
                 if let Some(src) = self.replace_path.clone() {
                     match std::fs::read(&src) {
                         Ok(src_bytes) => {
-                            self.apply_all("replace", move |_, d| {
-                                wav::replace_fit(d, &src_bytes)
-                            });
+                            self.apply_all("replace", move |base| wav::replace_fit(base, &src_bytes));
                         }
                         Err(e) => self.push(format!("read {} failed: {}", src.display(), e)),
                     }
@@ -392,19 +411,21 @@ impl App {
             .stick_to_bottom(true)
             .max_height(180.0)
             .show(ui, |ui| {
-                for line in self.log.iter().rev().take(40) {
+                let start = self.log.len().saturating_sub(40);
+                for line in &self.log[start..] {
                     ui.label(egui::RichText::new(line).monospace().small());
                 }
             });
     }
 
     fn table(&mut self, ui: &mut egui::Ui) {
-        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+        let typing = ui.memory(|m| m.focused().is_some());
+        if !typing && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
             for i in &self.filtered {
                 self.selected.insert(*i);
             }
         }
-        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D)) {
+        if !typing && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D)) {
             self.selected.clear();
             self.anchor = None;
         }
@@ -416,6 +437,9 @@ impl App {
                     .hint_text("revolver, footsteps, cart..."),
             );
             if resp.changed() {
+                // stale selections must not survive a new search
+                self.selected.clear();
+                self.anchor = None;
                 self.refilter();
             }
             egui::ComboBox::from_id_salt("filter")
@@ -432,6 +456,9 @@ impl App {
                             Filter::Original => "Original",
                                 };
                         if ui.selectable_label(self.filter == f, name).clicked() {
+                            if self.filter != f {
+                                self.selected.clear();
+                            }
                             self.filter = f;
                             self.refilter();
                         }
