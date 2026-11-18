@@ -1,0 +1,9 @@
+target/
+*.exe
+*.pdb
+__pycache__/
+backup_mods/
+dist/
+*.bin
+scripts/
+README.txt
