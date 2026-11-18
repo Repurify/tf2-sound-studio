@@ -2990,7 +2990,7 @@ dependencies = [
 
 [[package]]
 name = "tf2-sound-studio"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "eframe",
  "egui",
