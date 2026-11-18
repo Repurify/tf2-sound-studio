@@ -12,6 +12,21 @@ enum Filter {
     Original,
 }
 
+
+#[cfg(windows)]
+fn shift_held() -> bool {
+    extern "system" {
+        fn GetAsyncKeyState(vk: i32) -> i16;
+    }
+    // VK_SHIFT
+    unsafe { (GetAsyncKeyState(0x10) as u16 & 0x8000) != 0 }
+}
+
+#[cfg(not(windows))]
+fn shift_held() -> bool {
+    false
+}
+
 pub struct App {
     tf_dir: Option<PathBuf>,
     dir_text: String,
@@ -19,6 +34,7 @@ pub struct App {
     filtered: Vec<usize>,
     selected: HashSet<usize>,
     anchor: Option<usize>,
+    shift_down: bool,
     backup: HashMap<Key, Vec<u8>>,
     search: String,
     filter: Filter,
@@ -42,6 +58,7 @@ impl App {
             filtered: Vec::new(),
             selected: HashSet::new(),
             anchor: None,
+            shift_down: false,
             backup: HashMap::new(),
             search: String::new(),
             filter: Filter::All,
@@ -419,6 +436,17 @@ impl App {
     }
 
     fn table(&mut self, ui: &mut egui::Ui) {
+        // Windows reports wheel movement as a horizontal delta while shift is held,
+        // which leaves the list frozen. Treat that as vertical so shift+scroll works.
+        if self.shift_down {
+            let (dx, dy) = ui.input(|i| (i.raw_scroll_delta.x, i.raw_scroll_delta.y));
+            if dy == 0.0 && dx != 0.0 {
+                ui.input_mut(|i| {
+                    i.raw_scroll_delta = egui::vec2(0.0, dx);
+                    i.smooth_scroll_delta = egui::vec2(0.0, dx);
+                });
+            }
+        }
         let typing = ui.memory(|m| m.focused().is_some());
         if !typing && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
             for i in &self.filtered {
@@ -507,68 +535,82 @@ impl App {
                     let modified = self.backup.contains_key(&key);
                     let path = self.entries[idx].path.clone();
                     let len = self.entries[idx].len;
-                    ui.horizontal(|ui| {
-                        let mut sel = self.selected.contains(&idx);
-                        if ui.checkbox(&mut sel, "").changed() {
-                            if sel {
-                                self.selected.insert(idx);
+                    let selected_now = self.selected.contains(&idx);
+
+                    let row_resp = ui
+                        .horizontal(|ui| {
+                            let mut sel = selected_now;
+                            if ui.checkbox(&mut sel, "").changed() {
+                                if sel {
+                                    self.selected.insert(idx);
+                                } else {
+                                    self.selected.remove(&idx);
+                                }
+                                self.anchor = Some(row);
+                            }
+                            let tag = if modified { "M " } else { "   " };
+                            let color = if modified {
+                                egui::Color32::from_rgb(200, 170, 120)
                             } else {
+                                egui::Color32::from_rgb(190, 195, 205)
+                            };
+                            ui.label(egui::RichText::new(tag).monospace().color(color));
+                            let short = path.strip_prefix("sound/").unwrap_or(&path);
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(short).monospace().color(color))
+                                    .selectable(false),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("{:.1} kB", len as f32 / 1024.0))
+                                            .weak()
+                                            .small(),
+                                    );
+                                },
+                            );
+                        })
+                        .response;
+
+                    // the whole row is clickable, not just the text; the checkbox keeps its own hit area
+                    let mut hit = row_resp.rect;
+                    hit.min.x += 26.0;
+                    let click = ui.interact(hit, egui::Id::new(("row", idx)), egui::Sense::click());
+                    if click.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if click.clicked() {
+                        let mods = ui.input(|i| i.modifiers);
+                        // winit can miss shift when the click arrives without key events
+                        if mods.shift || self.shift_down {
+                            // first shift+click sets the anchor, later ones extend from it
+                            let a = self.anchor.unwrap_or(row);
+                            self.anchor = Some(a);
+                            let (lo, hi) = if a <= row { (a, row) } else { (row, a) };
+                            if !mods.command {
+                                self.selected.clear();
+                            }
+                            for p in lo..=hi {
+                                self.selected.insert(self.filtered[p]);
+                            }
+                        } else if mods.command || mods.alt {
+                            if self.selected.contains(&idx) {
                                 self.selected.remove(&idx);
+                            } else {
+                                self.selected.insert(idx);
+                            }
+                            self.anchor = Some(row);
+                        } else {
+                            if self.selected.len() == 1 && self.selected.contains(&idx) {
+                                self.selected.clear();
+                            } else {
+                                self.selected.clear();
+                                self.selected.insert(idx);
                             }
                             self.anchor = Some(row);
                         }
-                        let tag = if modified { "M " } else { "   " };
-                        let color = if modified {
-                            egui::Color32::from_rgb(200, 170, 120)
-                        } else {
-                            egui::Color32::from_rgb(190, 195, 205)
-                        };
-                        ui.label(egui::RichText::new(tag).monospace().color(color));
-                        let short = path.strip_prefix("sound/").unwrap_or(&path);
-                        let lbl = ui.add(
-                            egui::Label::new(egui::RichText::new(short).monospace().color(color))
-                                .selectable(false)
-                                .sense(egui::Sense::click()),
-                        );
-                        if lbl.clicked() {
-                            let mods = ui.input(|i| i.modifiers);
-                            if mods.shift {
-                                let a = self.anchor.unwrap_or(row);
-                                let (lo, hi) = if a <= row { (a, row) } else { (row, a) };
-                                if !mods.command {
-                                    self.selected.clear();
-                                }
-                                for p in lo..=hi {
-                                    self.selected.insert(self.filtered[p]);
-                                }
-                            } else if mods.command || mods.alt {
-                                if self.selected.contains(&idx) {
-                                    self.selected.remove(&idx);
-                                } else {
-                                    self.selected.insert(idx);
-                                }
-                                self.anchor = Some(row);
-                            } else {
-                                if self.selected.len() == 1 && self.selected.contains(&idx) {
-                                    self.selected.clear();
-                                } else {
-                                    self.selected.clear();
-                                    self.selected.insert(idx);
-                                }
-                                self.anchor = Some(row);
-                            }
-                        }
-                        if lbl.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new(format!("{:.1} kB", len as f32 / 1024.0))
-                                    .weak()
-                                    .small(),
-                            );
-                        });
-                    });
+                    }
                 }
             });
     }
@@ -576,6 +618,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.shift_down = shift_held();
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
             self.top_bar(ui);
