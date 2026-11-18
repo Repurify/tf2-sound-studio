@@ -27,6 +27,24 @@ fn shift_held() -> bool {
     false
 }
 
+#[derive(Clone)]
+enum Op {
+    Gain(f32),
+    Mute,
+    Replace(Vec<u8>),
+}
+
+struct Job {
+    label: String,
+    targets: Vec<vpk::Entry>,
+    op: Op,
+    idx: usize,
+    ok: usize,
+    fail: usize,
+    skipped: usize,
+    logged_skip: usize,
+}
+
 pub struct App {
     tf_dir: Option<PathBuf>,
     dir_text: String,
@@ -35,6 +53,7 @@ pub struct App {
     selected: HashSet<usize>,
     anchor: Option<usize>,
     shift_down: bool,
+    job: Option<Job>,
     backup: HashMap<Key, Vec<u8>>,
     search: String,
     filter: Filter,
@@ -59,6 +78,7 @@ impl App {
             selected: HashSet::new(),
             anchor: None,
             shift_down: false,
+            job: None,
             backup: HashMap::new(),
             search: String::new(),
             filter: Filter::All,
@@ -144,7 +164,11 @@ impl App {
         v
     }
 
-    fn apply_all(&mut self, label: &str, mut f: impl FnMut(&[u8]) -> Option<Vec<u8>>) {
+    fn start_job(&mut self, label: &str, op: Op) {
+        if self.job.is_some() {
+            self.push("still working on the previous batch");
+            return;
+        }
         let Some(dir) = self.tf_dir.clone() else {
             self.push("no tf folder loaded");
             return;
@@ -160,66 +184,110 @@ impl App {
             self.push("nothing selected");
             return;
         }
-        let (mut ok, mut fail, mut skipped) = (0usize, 0usize, 0usize);
-        for e in &targets {
+        self.job = Some(Job {
+            label: label.to_string(),
+            targets,
+            op,
+            idx: 0,
+            ok: 0,
+            fail: 0,
+            skipped: 0,
+            logged_skip: 0,
+        });
+    }
+
+    /// Small slice per frame keeps the window responsive during big batches.
+    fn process_job(&mut self, ctx: &egui::Context) {
+        let Some(mut job) = self.job.take() else { return };
+        let Some(dir) = self.tf_dir.clone() else {
+            self.job = None;
+            return;
+        };
+        const PER_FRAME: usize = 12;
+        let mut processed = 0usize;
+        while processed < PER_FRAME && job.idx < job.targets.len() {
+            let e = &job.targets[job.idx];
+            job.idx += 1;
+            processed += 1;
+
+            // compressed entries cannot be edited; skip before touching the disk
+            if e.path.to_ascii_lowercase().ends_with(".mp3") {
+                job.skipped += 1;
+                continue;
+            }
             let current = match vpk::read_entry(&dir, e) {
                 Ok(d) => d,
                 Err(err) => {
                     self.push(format!("read {} failed: {}", e.path, err));
-                    fail += 1;
+                    job.fail += 1;
                     continue;
                 }
             };
-            // always transform from the original bytes when we have them, so gain
-            // does not stack and a second replace starts from a clean slate
             let baseline = self
                 .backup
                 .get(&e.key())
                 .cloned()
                 .unwrap_or_else(|| current.clone());
-            let new = match f(&baseline) {
+            let new = match &job.op {
+                Op::Gain(g) => wav::gain(&baseline, *g).map(|(d, _, _)| d),
+                Op::Mute => wav::silence(&baseline),
+                Op::Replace(bytes) => wav::replace_fit(&baseline, bytes),
+            };
+            let new = match new {
                 Some(n) => n,
                 None => {
-                    skipped += 1;
-                    self.push(format!("{}: unsupported format, skipped", e.path));
+                    job.skipped += 1;
+                    if job.logged_skip < 5 {
+                        self.push(format!("{}: unsupported format, skipped", e.path));
+                        job.logged_skip += 1;
+                    }
                     continue;
                 }
             };
             if new.len() != e.len as usize {
                 self.push(format!("{}: length changed, skipped", e.path));
-                fail += 1;
+                job.fail += 1;
                 continue;
             }
-            // durability: the original must be on disk before the game file changes
-            self.backup.entry(e.key()).or_insert_with(|| baseline.clone());
-            if let Err(err) = store::save(&dir, &self.backup) {
-                self.push(format!("backup save failed, aborting: {}", err));
-                fail += 1;
-                break;
+            if !self.backup.contains_key(&e.key()) {
+                if let Err(err) = store::append(&dir, e.key(), &baseline) {
+                    self.push(format!("backup write failed, aborting: {}", err));
+                    job.fail += 1;
+                    job.idx = job.targets.len();
+                    break;
+                }
+                self.backup.insert(e.key(), baseline.clone());
             }
             match vpk::write_entry(&dir, e, &new) {
                 Ok(_) => match vpk::read_entry(&dir, e) {
-                    Ok(check) if check == new => ok += 1,
+                    Ok(check) if check == new => job.ok += 1,
                     Ok(_) => {
                         self.push(format!("{}: write did not stick, skipped", e.path));
-                        fail += 1;
+                        job.fail += 1;
                     }
                     Err(err) => {
                         self.push(format!("{}: verify failed: {}", e.path, err));
-                        fail += 1;
+                        job.fail += 1;
                     }
                 },
                 Err(err) => {
                     self.push(format!("write {} failed: {}", e.path, err));
-                    fail += 1;
+                    job.fail += 1;
                 }
             }
         }
-        self.push(format!(
-            "{}: {} ok, {} failed, {} skipped",
-            label, ok, fail, skipped
-        ));
-        self.refilter();
+
+        if job.idx < job.targets.len() {
+            self.job = Some(job);
+            ctx.request_repaint();
+        } else {
+            self.push(format!(
+                "{}: {} ok, {} failed, {} skipped (mp3/unsupported)",
+                job.label, job.ok, job.fail, job.skipped
+            ));
+            self.job = None;
+            self.refilter();
+        }
     }
 
     fn restore_selected(&mut self) {
@@ -317,6 +385,12 @@ impl App {
             egui::RichText::new(format!("{} selected", self.selected.len()))
                 .color(egui::Color32::from_rgb(150, 160, 180)),
         );
+        if let Some(job) = &self.job {
+            ui.label(
+                egui::RichText::new(format!("working {}/{}", job.idx, job.targets.len()))
+                    .color(egui::Color32::from_rgb(200, 170, 120)),
+            );
+        }
         ui.separator();
 
         ui.label("Amplify");
@@ -329,7 +403,7 @@ impl App {
             ui.label(egui::RichText::new(Self::db_label(self.gain)).weak());
             if ui.button("Apply gain").clicked() {
                 let g = self.gain;
-                self.apply_all("gain", move |base| wav::gain(base, g).map(|(d, _, _)| d));
+                self.start_job("gain", Op::Gain(g));
             }
         });
 
@@ -337,7 +411,7 @@ impl App {
         ui.label("Mute");
         ui.horizontal(|ui| {
             if ui.button("Silence selected").clicked() {
-                self.apply_all("mute", |base| wav::silence(base));
+                self.start_job("mute", Op::Mute);
             }
         });
 
@@ -399,7 +473,7 @@ impl App {
                 if let Some(src) = self.replace_path.clone() {
                     match std::fs::read(&src) {
                         Ok(src_bytes) => {
-                            self.apply_all("replace", move |base| wav::replace_fit(base, &src_bytes));
+                            self.start_job("replace", Op::Replace(src_bytes));
                         }
                         Err(e) => self.push(format!("read {} failed: {}", src.display(), e)),
                     }
@@ -619,6 +693,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.shift_down = shift_held();
+        self.process_job(ctx);
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
             self.top_bar(ui);
