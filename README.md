@@ -81,6 +81,21 @@ build still succeeds with a warning.
 - Corrupt VPK directories, damaged backup files and unreadable replacement WAVs are reported in
   the log instead of crashing.
 
+## Issues and feature requests
+
+Bug reports and ideas are welcome: <https://github.com/Repurify/tf2-sound-studio/issues>
+
+When opening a bug report, include:
+
+- the sound path (for example `sound/items/cart_rolling.wav`), or the search term you used
+- what you pressed (amplify / silence / replace / restore) and the slider value
+- the last line from the log panel in the Actions column
+- for a crash: the exact message and whether TF2 was running at the time
+- whether Steam *verify integrity* was run since the last edit
+
+Feature requests: describe the workflow you want, not only the button. That makes it much
+easier to tell whether it belongs in the tool or is better handled with a soundscript.
+
 ## Limitations
 
 - Steam *verify integrity* or a game update restores original waves; re-apply afterwards.
