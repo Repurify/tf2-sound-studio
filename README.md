@@ -7,6 +7,8 @@ Written in Rust with [egui](https://github.com/emilk/egui). Single self-containe
 
 ![icon](tf2%20sound%20studio/icon.png)
 
+![TF2 Sound Studio](docs/screenshot.png)
+
 ## Why edit the VPK instead of a custom folder
 
 `sv_pure` servers ignore `tf/custom` soundscripts and loose `.wav` overrides, and the server's own
