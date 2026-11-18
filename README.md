@@ -5,8 +5,6 @@ any of the ~16,000 `.wav`/`.mp3` entries in `tf2_sound_misc` and `tf2_sound_vo_e
 
 Written in Rust with [egui](https://github.com/emilk/egui). Single self-contained executable.
 
-![icon](tf2%20sound%20studio/icon.png)
-
 ![TF2 Sound Studio](docs/screenshot.png)
 
 ## Why edit the VPK instead of a custom folder
