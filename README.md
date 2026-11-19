@@ -20,7 +20,9 @@ is served as-is.
 - Lists every sound in both sound packs (15,958 entries) with instant search
 - Explorer-style selection: any click anywhere on a row selects it (and clicking the
   same row again deselects), Ctrl/Alt+click toggles, Shift+click selects the range from
-  the last anchor even after scrolling, Ctrl+A selects everything visible, Ctrl+D clears
+  the last anchor even after scrolling, Ctrl+A selects everything visible, Ctrl+D clears.
+  The tick box follows the same rules, so Shift+clicking a tick selects the range instead
+  of toggling that one row
 - Amplify 0.1x - 4.0x with live dB readout; samples are clamped, so the wave keeps
   its exact byte length
 - Mute (zeroes the PCM payload, header preserved)

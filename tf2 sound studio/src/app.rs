@@ -581,6 +581,38 @@ impl App {
         ));
     }
 
+    /// Shared by the row body and the checkbox so both obey the same rules:
+    /// shift extends from the anchor, ctrl/alt toggles, plain click selects one.
+    fn handle_row_click(&mut self, row: usize, idx: usize, mods: egui::Modifiers) {
+        if mods.shift || self.shift_down {
+            // first shift+click sets the anchor, later ones extend from it
+            let a = self.anchor.unwrap_or(row);
+            self.anchor = Some(a);
+            let (lo, hi) = if a <= row { (a, row) } else { (row, a) };
+            if !mods.command {
+                self.selected.clear();
+            }
+            for p in lo..=hi {
+                self.selected.insert(self.filtered[p]);
+            }
+        } else if mods.command || mods.alt {
+            if self.selected.contains(&idx) {
+                self.selected.remove(&idx);
+            } else {
+                self.selected.insert(idx);
+            }
+            self.anchor = Some(row);
+        } else {
+            if self.selected.len() == 1 && self.selected.contains(&idx) {
+                self.selected.clear();
+            } else {
+                self.selected.clear();
+                self.selected.insert(idx);
+            }
+            self.anchor = Some(row);
+        }
+    }
+
     fn table(&mut self, ui: &mut egui::Ui) {
         // Windows reports wheel movement as a horizontal delta while shift is held,
         // which leaves the list frozen. Treat that as vertical so shift+scroll works.
@@ -686,13 +718,20 @@ impl App {
                     let row_resp = ui
                         .horizontal(|ui| {
                             let mut sel = selected_now;
-                            if ui.checkbox(&mut sel, "").changed() {
-                                if sel {
-                                    self.selected.insert(idx);
+                            let cb = ui.add(egui::Checkbox::without_text(&mut sel));
+                            if cb.clicked() {
+                                let mods = ui.input(|i| i.modifiers);
+                                if mods.shift || self.shift_down {
+                                    // shift on the tick works like shift on the row: range, no toggle
+                                    self.handle_row_click(row, idx, mods);
                                 } else {
-                                    self.selected.remove(&idx);
+                                    if sel {
+                                        self.selected.insert(idx);
+                                    } else {
+                                        self.selected.remove(&idx);
+                                    }
+                                    self.anchor = Some(row);
                                 }
-                                self.anchor = Some(row);
                             }
                             let tag = if modified { "M " } else { "   " };
                             let color = if modified {
@@ -727,35 +766,9 @@ impl App {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
                     if click.clicked() {
-                        let mods = ui.input(|i| i.modifiers);
                         // winit can miss shift when the click arrives without key events
-                        if mods.shift || self.shift_down {
-                            // first shift+click sets the anchor, later ones extend from it
-                            let a = self.anchor.unwrap_or(row);
-                            self.anchor = Some(a);
-                            let (lo, hi) = if a <= row { (a, row) } else { (row, a) };
-                            if !mods.command {
-                                self.selected.clear();
-                            }
-                            for p in lo..=hi {
-                                self.selected.insert(self.filtered[p]);
-                            }
-                        } else if mods.command || mods.alt {
-                            if self.selected.contains(&idx) {
-                                self.selected.remove(&idx);
-                            } else {
-                                self.selected.insert(idx);
-                            }
-                            self.anchor = Some(row);
-                        } else {
-                            if self.selected.len() == 1 && self.selected.contains(&idx) {
-                                self.selected.clear();
-                            } else {
-                                self.selected.clear();
-                                self.selected.insert(idx);
-                            }
-                            self.anchor = Some(row);
-                        }
+                        let mods = ui.input(|i| i.modifiers);
+                        self.handle_row_click(row, idx, mods);
                     }
                 }
             });
