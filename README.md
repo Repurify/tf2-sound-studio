@@ -98,7 +98,7 @@ Describe what is broken or what you want added. For bugs, say how to reproduce i
 ## A sound still plays after you silence it
 
 That is almost always the game's sound cache, not the edit. TF2 resolves wave names through
-`*.sound.cache` files (`tf	f2_sound_misc.vpk.sound.cache`, `tf\sound\sound.cache`, and copies
+`*.sound.cache` files (`tf/tf2_sound_misc.vpk.sound.cache`, `tf/sound/sound.cache`, and copies
 under `download`, `sound_workshop` and each `custom` add-on). If one of those is older than your
 edit, the client keeps playing the old audio even though the bytes in the VPK are already silent.
 
