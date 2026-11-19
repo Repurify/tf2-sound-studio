@@ -78,6 +78,9 @@ build still succeeds with a warning.
   24/32-bit waves are reported as skipped and are not marked modified.
 - Large batches are processed a few files per frame, so the window stays responsive and shows
   `working 120/786`.
+- `Clear sound cache` deletes the game's `*.sound.cache` files. TF2 resolves wave names through
+  them, and a cache older than your edit keeps playing the old audio even when the VPK bytes are
+  already silent. The game rebuilds them on the next launch.
 - Muting 8-bit PCM writes 0x80 (the unsigned midpoint), not 0x00, so it is silence instead of
   a click.
 - Replacement audio keeps its own channels: stereo stays stereo, mono is duplicated, stereo into
@@ -91,6 +94,22 @@ build still succeeds with a warning.
 Bugs and ideas: <https://github.com/Repurify/tf2-sound-studio/issues>
 
 Describe what is broken or what you want added. For bugs, say how to reproduce it.
+
+## A sound still plays after you silence it
+
+That is almost always the game's sound cache, not the edit. TF2 resolves wave names through
+`*.sound.cache` files (`tf	f2_sound_misc.vpk.sound.cache`, `tf\sound\sound.cache`, and copies
+under `download`, `sound_workshop` and each `custom` add-on). If one of those is older than your
+edit, the client keeps playing the old audio even though the bytes in the VPK are already silent.
+
+1. Close Team Fortress 2 completely (the VPK and the caches are locked while it runs).
+2. Press `Clear sound cache` in the app.
+3. Start TF2 again. The caches are rebuilt on launch.
+
+If it still plays, the sound is a different entry: check for `_start` / `_stop` siblings of the loop
+you muted, and for random one-shots a soundscape can trigger (`ambient_mp3/dog1-6`, `hawk`, `owl`,
+`crow` are common ones). `snd_show` will not list those, because they come from the soundscape
+layer rather than the engine's sound scheduler.
 
 ## Limitations
 

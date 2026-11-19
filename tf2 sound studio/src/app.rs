@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::store::{self, Key};
 use crate::vpk::{self, Entry};
@@ -509,6 +509,19 @@ impl App {
             }
         });
 
+        ui.add_space(10.0);
+        ui.separator();
+        ui.label(egui::RichText::new("Sound cache").weak().small());
+        ui.horizontal(|ui| {
+            if ui
+                .button("Clear sound cache")
+                .on_hover_text("Deletes *.sound.cache so the game reloads edited waves. Close TF2 first.")
+                .clicked()
+            {
+                self.clear_sound_caches();
+            }
+        });
+
         ui.add_space(12.0);
         ui.separator();
         ui.label(egui::RichText::new("Log").weak().small());
@@ -521,6 +534,51 @@ impl App {
                     ui.label(egui::RichText::new(line).monospace().small());
                 }
             });
+    }
+
+    /// TF2 caches wave lookups in `*.sound.cache` / `sound.cache`. A cache older
+    /// than the edit makes the game play the old audio even when the VPK bytes are
+    /// already silent, so this has to be reachable from the UI.
+    fn clear_sound_caches(&mut self) {
+        let Some(dir) = self.tf_dir.clone() else {
+            self.push("no tf folder loaded");
+            return;
+        };
+        if !vpk::can_write(&dir, vpk::PACK_MISC) {
+            self.push("cannot clear the cache: close Team Fortress 2 first");
+            self.writable = false;
+            return;
+        }
+        fn walk(d: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(d) else { return };
+            for e in rd.flatten() {
+                let Ok(ft) = e.file_type() else { continue };
+                if ft.is_dir() {
+                    walk(&e.path(), out);
+                } else if is_cache_name(&e.file_name().to_string_lossy()) {
+                    out.push(e.path());
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(&dir, &mut files);
+        let (mut removed, mut bytes, mut failed) = (0usize, 0u64, 0usize);
+        for f in &files {
+            let len = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+            match std::fs::remove_file(f) {
+                Ok(_) => {
+                    removed += 1;
+                    bytes += len;
+                }
+                Err(_) => failed += 1,
+            }
+        }
+        self.push(format!(
+            "sound cache: {} removed ({} MB), {} failed; relaunch TF2",
+            removed,
+            bytes / (1024 * 1024),
+            failed
+        ));
     }
 
     fn table(&mut self, ui: &mut egui::Ui) {
@@ -767,4 +825,22 @@ pub fn detect_tf_dir() -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn is_cache_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("sound.cache") || name.to_ascii_lowercase().ends_with(".sound.cache")
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::is_cache_name;
+
+    #[test]
+    fn cache_names() {
+        assert!(is_cache_name("sound.cache"));
+        assert!(is_cache_name("tf2_sound_misc.vpk.sound.cache"));
+        assert!(is_cache_name("TF2_SOUND_MISC.VPK.SOUND.CACHE"));
+        assert!(!is_cache_name("modelsounds.cache"));
+        assert!(!is_cache_name("soundcache.txt"));
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "tf2-sound-studio"
-version = "1.0.5"
+version = "1.0.6"
 edition = "2021"
 description = "TF2 sound editor - mute, amplify, replace sound waves in the game VPKs"
 
